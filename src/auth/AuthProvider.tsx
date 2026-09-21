@@ -1,218 +1,329 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
-import type { Role } from '@/types/models'
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
+import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '@/lib/supabase'
-import { isSupabaseConfigured } from '@/lib/env'
+import type { Role } from '@/types/models'
 
-export interface SessionUser {
+type AuthUser = {
   id: string
-  name: string
   email: string
+  name: string
+  company: string
   role: Role
-  organisation: string
-  demo: boolean
 }
 
-interface AuthContextValue {
-  user: SessionUser | null
+type SignUpInput = {
+  name: string
+  company: string
+  email: string
+  password: string
+}
+
+type SignUpResult = {
+  needsConfirmation: boolean
+}
+
+type AuthContextValue = {
+  user: AuthUser | null
+  session: Session | null
   loading: boolean
   demoMode: boolean
   signIn: (email: string, password: string) => Promise<void>
-  signUp: (input: { name: string; email: string; password: string; company: string }) => Promise<{ needsConfirmation: boolean }>
-  signInDemo: (role: Role) => void
+  signUp: (input: SignUpInput) => Promise<SignUpResult>
   signOut: () => Promise<void>
+  signInDemo: (role: Role) => void
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
-const DEMO_KEY = 'quarryos.demo-session'
 
-const DEMO_USERS: Record<Role, Omit<SessionUser, 'demo'>> = {
-  owner: { id: 'demo-owner', name: 'Venkat Ramana', email: 'owner@demo.quarryos.example', role: 'owner', organisation: 'Meridian Granites' },
-  admin: { id: 'demo-admin', name: 'Sirisha Devi', email: 'admin@demo.quarryos.example', role: 'admin', organisation: 'Meridian Granites' },
-  manager: { id: 'demo-manager', name: 'Lakshmi Prasanna', email: 'manager@demo.quarryos.example', role: 'manager', organisation: 'Meridian Granites' },
-  sales: { id: 'demo-sales', name: 'Tarun Sharma', email: 'sales@demo.quarryos.example', role: 'sales', organisation: 'Meridian Granites' },
-  worker: { id: 'demo-worker', name: 'Padma Latha', email: 'yard@demo.quarryos.example', role: 'worker', organisation: 'Meridian Granites' },
+const VALID_ROLES: Role[] = [
+  'owner',
+  'admin',
+  'manager',
+  'sales',
+  'worker',
+]
+
+function isRole(value: unknown): value is Role {
+  return typeof value === 'string' && VALID_ROLES.includes(value as Role)
 }
 
-const ROLES: Role[] = ['owner', 'admin', 'manager', 'sales', 'worker']
+function getUserName(user: User) {
+  return (
+    user.user_metadata?.full_name ??
+    user.user_metadata?.name ??
+    user.email?.split('@')[0] ??
+    'User'
+  )
+}
 
-function toSessionUser(u: {
-  id: string
-  email?: string | null
-  user_metadata?: Record<string, unknown>
-  app_metadata?: Record<string, unknown>
-}): SessionUser {
-  const r = u.app_metadata?.role as Role | undefined
+function getCompanyName(user: User) {
+  return (
+    user.user_metadata?.company ??
+    user.user_metadata?.company_name ??
+    'My Quarry'
+  )
+}
+
+/**
+ * Loads the user's actual QuarryOS role from quarry_members.
+ *
+ * This is intentionally based on the database membership rather than
+ * app_metadata, because quarry_members is the source of truth for
+ * workspace access.
+ */
+async function loadAuthUser(user: User): Promise<AuthUser> {
+  if (!supabase) {
+    throw new Error('Supabase is not configured.')
+  }
+
+  let role: Role | null = null
+
+  const { data: membership, error: membershipError } = await supabase
+    .from('quarry_members')
+    .select('role')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (membershipError) {
+    console.error('Failed to load QuarryOS membership:', membershipError)
+  } else if (membership && isRole(membership.role)) {
+    role = membership.role
+  }
+
+  // Fallback for existing accounts that may not have a membership yet.
+  if (!role && isRole(user.app_metadata?.role)) {
+    role = user.app_metadata.role
+  }
+
+  // A newly-created QuarryOS account should normally have an owner
+  // membership created by the database trigger.
+  if (!role) {
+    role = 'owner'
+  }
 
   return {
-    id: u.id,
-    email: u.email ?? '',
-    name:
-      (u.user_metadata?.full_name as string | undefined) ??
-      (u.email ?? 'User').split('@')[0]!,
-    role: r && ROLES.includes(r) ? r : 'worker',
-    organisation:
-      (u.user_metadata?.company as string | undefined) ??
-      'Your organisation',
-    demo: false,
+    id: user.id,
+    email: user.email ?? '',
+    name: getUserName(user),
+    company: getCompanyName(user),
+    role,
   }
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<SessionUser | null>(null)
+  const [user, setUser] = useState<AuthUser | null>(null)
+  const [session, setSession] = useState<Session | null>(null)
   const [loading, setLoading] = useState(true)
 
+  const demoMode = !supabase
+
   useEffect(() => {
-    if (supabase) {
-      supabase.auth.getSession().then(({ data }) => {
-        setUser(
-          data.session
-            ? toSessionUser(data.session.user)
-            : null,
-        )
+    let mounted = true
+
+    if (!supabase) {
+      setLoading(false)
+      return
+    }
+
+    const initialiseAuth = async () => {
+      try {
+        const {
+          data: { session: currentSession },
+          error,
+        } = await supabase.auth.getSession()
+
+        if (error) {
+          console.error('Failed to restore Supabase session:', error)
+          return
+        }
+
+        if (!mounted) return
+
+        setSession(currentSession)
+
+        if (currentSession?.user) {
+          const authUser = await loadAuthUser(currentSession.user)
+
+          if (mounted) {
+            setUser(authUser)
+          }
+        } else {
+          setUser(null)
+        }
+      } catch (error) {
+        console.error('Auth initialization failed:', error)
+
+        if (mounted) {
+          setSession(null)
+          setUser(null)
+        }
+      } finally {
+        if (mounted) {
+          setLoading(false)
+        }
+      }
+    }
+
+    void initialiseAuth()
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, nextSession) => {
+      if (!mounted) return
+
+      setSession(nextSession)
+
+      if (!nextSession?.user) {
+        setUser(null)
         setLoading(false)
-      })
-
-      const { data: sub } =
-        supabase.auth.onAuthStateChange(
-          (_e, session) => {
-            setUser(
-              session
-                ? toSessionUser(session.user)
-                : null,
-            )
-          },
-        )
-
-      return () => sub.subscription.unsubscribe()
-    }
-
-    try {
-      const raw = localStorage.getItem(DEMO_KEY)
-
-      if (raw) {
-        setUser({
-          ...(DEMO_USERS[JSON.parse(raw) as Role] ??
-            DEMO_USERS.owner),
-          demo: true,
-        })
+        return
       }
-    } catch {
-      // Ignore storage errors.
-    }
 
-    setLoading(false)
-  }, [])
+      /*
+       * Avoid doing database work directly inside Supabase's auth callback
+       * synchronously. A small timeout lets Supabase finish its internal
+       * auth transaction first.
+       */
+      setTimeout(async () => {
+        if (!mounted) return
 
-  const signInDemo = useCallback((role: Role) => {
-    try {
-      localStorage.setItem(
-        DEMO_KEY,
-        JSON.stringify(role),
-      )
-    } catch {
-      // Ignore storage errors.
-    }
+        try {
+          const authUser = await loadAuthUser(nextSession.user)
 
-    setUser({
-      ...DEMO_USERS[role],
-      demo: true,
+          if (mounted) {
+            setUser(authUser)
+          }
+        } catch (error) {
+          console.error('Failed to load QuarryOS user:', error)
+        } finally {
+          if (mounted) {
+            setLoading(false)
+          }
+        }
+      }, 0)
     })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
   }, [])
 
-  const signIn = useCallback(
-    async (email: string, password: string) => {
-      if (!supabase) {
-        throw new Error(
-          'Supabase is not configured. Use the demo sign-in below.',
-        )
-      }
+  const signIn = async (email: string, password: string) => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
 
-      const { error } =
-        await supabase.auth.signInWithPassword({
-          email,
-          password,
-        })
-
-      if (error) {
-        throw new Error(error.message)
-      }
-    },
-    [],
-  )
-
-  const signUp = useCallback(
-    async ({
-      name,
+    const { data, error } = await supabase.auth.signInWithPassword({
       email,
       password,
-      company,
-    }: {
-      name: string
-      email: string
-      password: string
-      company: string
-    }) => {
-      if (!supabase) {
-        throw new Error(
-          'Supabase is not configured. Use the demo sign-in instead.',
-        )
-      }
+    })
 
-      const { data, error } =
-        await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: {
-              full_name: name,
-              company,
-            },
-          },
-        })
-
-      if (error) {
-        throw new Error(error.message)
-      }
-
-      return {
-        needsConfirmation: !data.session,
-      }
-    },
-    [],
-  )
-
-  const signOut = useCallback(async () => {
-    if (supabase) {
-      await supabase.auth.signOut()
+    if (error) {
+      throw error
     }
 
-    try {
-      localStorage.removeItem(DEMO_KEY)
-    } catch {
-      // Ignore storage errors.
+    if (!data.user) {
+      throw new Error('Sign-in succeeded but no user was returned.')
+    }
+
+    const authUser = await loadAuthUser(data.user)
+
+    setSession(data.session)
+    setUser(authUser)
+  }
+
+  const signUp = async (input: SignUpInput): Promise<SignUpResult> => {
+    if (!supabase) {
+      throw new Error('Supabase is not configured.')
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: input.email,
+      password: input.password,
+      options: {
+        data: {
+          full_name: input.name,
+          company: input.company,
+        },
+      },
+    })
+
+    if (error) {
+      throw error
+    }
+
+    /*
+     * If email confirmation is enabled, Supabase returns a user but
+     * no active session. The Signup page will show the confirmation screen.
+     */
+    if (!data.session || !data.user) {
+      return {
+        needsConfirmation: true,
+      }
+    }
+
+    const authUser = await loadAuthUser(data.user)
+
+    setSession(data.session)
+    setUser(authUser)
+
+    return {
+      needsConfirmation: false,
+    }
+  }
+
+  const signOut = async () => {
+    if (!supabase) {
+      setUser(null)
+      setSession(null)
+      return
+    }
+
+    const { error } = await supabase.auth.signOut()
+
+    if (error) {
+      throw error
     }
 
     setUser(null)
-  }, [])
+    setSession(null)
+  }
+
+  const signInDemo = (role: Role) => {
+    const demoUser: AuthUser = {
+      id: `demo-${role}`,
+      email: `${role}@demo.quarryos.local`,
+      name: `Demo ${role.charAt(0).toUpperCase()}${role.slice(1)}`,
+      company: 'QuarryOS Demo',
+      role,
+    }
+
+    setUser(demoUser)
+    setSession(null)
+  }
 
   const value = useMemo<AuthContextValue>(
     () => ({
       user,
+      session,
       loading,
-      demoMode: !isSupabaseConfigured,
+      demoMode,
       signIn,
       signUp,
-      signInDemo,
       signOut,
+      signInDemo,
     }),
-    [
-      user,
-      loading,
-      signIn,
-      signUp,
-      signInDemo,
-      signOut,
-    ],
+    [user, session, loading, demoMode],
   )
 
   return (
@@ -223,13 +334,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 }
 
 export function useAuth() {
-  const ctx = useContext(AuthContext)
+  const context = useContext(AuthContext)
 
-  if (!ctx) {
-    throw new Error(
-      'useAuth must be used inside <AuthProvider>',
-    )
+  if (!context) {
+    throw new Error('useAuth must be used inside AuthProvider')
   }
 
-  return ctx
+  return context
 }
