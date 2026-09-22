@@ -48,7 +48,7 @@ src/
   hooks/  lib/  types/
 ```
 ~~~
-##Architecture diagram
+##Architecture diagram:
                     ┌──────────────────────┐
                     │      QuarryOS        │
                     │   React + TypeScript │
@@ -80,6 +80,7 @@ src/
                        Row Level Security
 ~~~
 ~~~
+##Application modules:
                     QuarryOS Application
                             │
        ┌────────────┬───────┼────────┬────────────┐
