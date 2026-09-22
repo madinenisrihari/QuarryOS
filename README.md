@@ -47,7 +47,38 @@ src/
   auth/             AuthProvider (Supabase or demo), permissions matrix, route guards
   hooks/  lib/  types/
 ```
-
+~~~
+##Architecture diagram
+                    ┌──────────────────────┐
+                    │      QuarryOS        │
+                    │   React + TypeScript │
+                    └──────────┬───────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+              ▼                ▼                ▼
+         Pages / Routes    Components        Layouts
+              │                │                │
+              └────────────────┼────────────────┘
+                               │
+                               ▼
+                         Service Layer
+                    ┌──────────┼──────────┐
+                    │          │          │
+                    ▼          ▼          ▼
+                  API       HTTP      Intelligence
+                    │
+                    ▼
+               Supabase Client
+                    │
+          ┌─────────┴─────────┐
+          │                   │
+          ▼                   ▼
+       Supabase Auth      PostgreSQL
+                              │
+                              ▼
+                       Row Level Security
+~~~
 **Going live** means replacing the bodies in `src/services/api.ts` with `request<T>('/v1/…')`. Signatures, models (`src/types/models.ts`) and pages stay the same.
 
 ## Design system
