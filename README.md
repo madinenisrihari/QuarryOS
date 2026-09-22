@@ -79,6 +79,20 @@ src/
                               ▼
                        Row Level Security
 ~~~
+~~~
+                    QuarryOS Application
+                            │
+       ┌────────────┬───────┼────────┬────────────┐
+       ▼            ▼       ▼        ▼            ▼
+   Operations    Commerce  People  Analytics  Intelligence
+       │            │       │        │            │
+   Quarry        Customers Employees Reports      AI
+   Blocks        Quotes    Vehicles  KPIs         Chat
+   Production    Sales     Machinery Trends       Insights
+   Inventory     Orders    Maintenance
+                 Payments
+                 Transport
+~~~
 **Going live** means replacing the bodies in `src/services/api.ts` with `request<T>('/v1/…')`. Signatures, models (`src/types/models.ts`) and pages stay the same.
 
 ## Design system
